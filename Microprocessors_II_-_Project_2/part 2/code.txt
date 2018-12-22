@@ -1,0 +1,323 @@
+@ 372 Project 2 - Part 2
+
+.data
+.align 2
+@ define stack sizes
+@--------------------------------------------------------------------
+LED_STATUS: 	.word 0x00
+STACK1:		.rept 1024
+		.word 0x00
+		.endr
+STACK2:		.rept 1024
+		.word 0x00
+		.endr
+				
+@ define word messages to send
+@--------------------------------------------------------------------
+.align 4
+MESSAGE:	.ascii "RYAN BENTZ" 
+INIT_STREAM: .byte 0x38, 0x39, 0x14, 0x78, 0x5E, 0x6D, 0x6D, 0x0C, 0x01, 0x06, 0x02
+STREAM_OFFSET: .byte 0x00
+INIT_INDEX: .byte 0x00
+MESSAGE_INDEX: .byte 0x00				
+			
+.text
+.global _start
+.global INT_DIRECTOR
+_start:
+
+@ Initialize the stack frames
+@--------------------------------------------------------------------
+LDR R13, =STACK1	@ initialize stack one for supervisor mode
+ADD R13, R13, #0x1000	@ point stack pointer to top of stack
+CPS #0x12		@ change to IRQ mode
+LDR R13, =STACK2	@ initialize stack for IRQ mode
+ADD R13, R13, #0x1000	@ point stack pointer to top of stack
+CPS #0x13		@ change back to supervisor mode
+
+
+@ Initialize the peripheral clocks
+@--------------------------------------------------------------------
+@ initialize the clock to I2C1
+LDR R0, =0x44E00048		@ CMPER.I2C1_CLKCTRL
+LDR R1, [R0]
+MOV	R2, #0x02
+ORR R1, R1, R2
+STR R1, [R0]
+
+
+@ Delay 1s and wait for peripheral clocks
+@--------------------------------------------------------------------
+BL DELAY
+
+
+@ Initialize the I2C
+@--------------------------------------------------------------------
+@ initialize the GPIO pins for the I2C functions
+@ set the SCL pin
+LDR R0, =0x44E1095C			@ CONTROL.conf_spi0_cs0
+LDR R1, [R0]
+AND R1, R1, #0xFFFFFFF8				@ mask bits [2:0]
+ORR R1, R1, #0x02					@ enable mode 2
+STR R1, [R0]
+
+@ set the SDA pin
+LDR R0, =0x44E10958					@ CONTROL.conf_spi0_d1
+LDR R1, [R0]
+AND R1, R1, #0xFFFFFFF8				@ mask bits [2:0]
+ORR R1, R1, #0x02					@ enable mode 2
+STR R1, [R0]
+
+@ set I2C ICLK prescaler
+LDR R0, =0x4802A0B0					@ I2C_PSC: Clock prescaler register
+LDR R1, [R0]
+MOV	R2, #0x4						@ 48 MHz clock / 4 = 12 MHz clock
+ORR R1, R1, R2
+STR R1, [R0]
+
+@ set SCLL value
+LDR R0, =0x4802A0B4					@ I2C_SCLL: Low time register
+LDR R1, [R0]
+MOV	R2, #0x35
+ORR R1, R1, R2
+STR R1, [R0]
+
+@ set SCLH value
+LDR R0, =0x4802A0B8					@ I2C_SCLH: High time register
+LDR R1, [R0]
+MOV	R2, #0x37
+ORR R1, R1, R2
+STR R1, [R0]
+
+@ take the I2C module out of reset mode
+LDR R0, =0x4802A0A4					@ I2C_CON: Control register
+LDR R1, [R0]
+MOV	R2, #0x8000
+ORR R1, R1, R2
+STR R1, [R0]
+
+@ configure I2C mode register without setting STT and STP
+LDR R0, =0x4802A0A4					@ I2C_CON: Control register
+LDR R1, [R0]
+LDR R2, =0xFFFF0000
+AND R1, R1, R2
+ORR R1, R1, #0x8600					@ 7-bit address: 0x8600, 10-bit address: 0x8700
+STR R1, [R0]
+
+@ configure the slave address
+LDR R0, =0x4802A0AC					@ I2C_SA: Slave address register
+LDR R1, [R0]
+AND R1, R1, #0x0000
+ORR R1, R1, #0x3C
+STR R1, [R0]
+
+@ clear the FIFO
+LDR R0, =0x4802A094		@ I2C_BUF Register
+LDR R1, [R0]
+LDR	R2, =0x4040			@ clear TXFIFO and RXFIFO
+ORR R1, R1, R2
+STR R1, [R0]
+
+
+@ Initialize the interrupt controller
+@--------------------------------------------------------------------
+@ initialize I2C interrupt
+LDR R0, =0x482000C8	@ INTC_MIR_CLEAR2
+LDR R1, [R0]			@ read the register value
+MOV R2, #0x80			@ interrupt 71 = bit 7 in MIR2
+ORR R1, R1, R2			@ unmask I2C interrupt
+STR R1, [R0]			@ write new value to the register
+
+
+@ Initialize interrupts in the processor
+@--------------------------------------------------------------------
+MRS R3, CPSR	@ copy CPSR to R3
+BIC R3, #0x80	@ clear bit 7
+MSR CPSR_c, R3	@ write back to CPSR
+
+
+@ enable the I2C interrupt
+LDR	R0, =0x4802A02C			@ I2C_IRQENABLE_SET
+LDR R1, [R0]
+LDR R2, =0x106				@ Bus Free = bit 8, NACK = bit 1
+ORR R1, R1, R2				@ enable BF and NACK interrupts
+STR	R1, [R0]
+
+@ Flag ARDY to get the transfer started
+LDR R0, =0x4802A024
+LDR R1, [R0]
+ORR R1, R1, #0x4
+STR R1, [R0]
+
+@ MAIN LOOP
+@--------------------------------------------------------------------
+MAIN_LOOP:
+	NOP				@ do nothing and wait for interrupt
+	B MAIN_LOOP				
+	B END
+
+
+@--------------------------------------------------------------------
+@ INT Director handles the interrupt routines
+INT_DIRECTOR:
+STMFD SP!, {R0-R5, LR}	@ push registers on to the stack
+
+@ check that I2C was the source of the interrupt
+LDR		R0, =0x482000D8		@ INTC_PENDING_IRQ2
+LDR 	R1, [R0]			@ read the pending interrupt register
+MOV		R2, #0x80			@ I2C interrupt = Bit 7
+AND 	R1, R1, R2
+CMP 	R1, #0x80
+BEQ 	INT_I2C
+
+@ exit int director ISR	
+CLOSE_IRQ:	
+@ reset the interrupt controller IRQ flag
+LDR R0, =0x48200048			@ INTC_CONTROL
+MOV R1, #0x1				@ value to reset IRQ generation
+STR R1, [R0]
+
+@ re-enable IRQ interrupts in the processor
+MRS R3, CPSR			@ copy CPSR to R3
+BIC R3, #0x80			@ clear bit 7
+MSR CPSR_c, R3			@ write back to CPSR	
+
+LDMFD SP!, {R0-R5, LR}	@ restore register states
+SUBS PC, LR, #4			@ return service to the system IRQ
+
+
+
+
+@----------------------------------------------------------------------------
+INT_I2C:
+@ check if NACK response was recieved
+LDR R0, =0x4802A028		@ I2C_IRQSTATUS Register
+LDR R1, [R0]			@ get IRQ register value
+AND R1, R1, #0x2		@ NACK = Bit 1
+CMP	R1, #0x00			@ If 0, it was something else
+BNE INT_I2C_NACK
+
+@ otherwise it was the BF or ARDY flag - do a transmission
+@ clear the ARDY flag
+LDR		R0, =0x4802A028			@ I2C_IRQSTATUS Register
+LDR		R1, [R0]
+ORR		R1, R1, #0x4
+STR		R1, [R0]
+
+@ check if we are doing initialization
+LDR		R0, =INIT_INDEX
+LDR		R1, =INIT_STREAM
+MOV		R8, #0x00
+LDRB	R2, [R0]
+CMP		R2,	#0xA				@ 9 bytes to send for initialization
+BLE		I2C_TX_SETUP			@ branch to INIT if less than or equal to 
+
+@ check if we are sending message bytes
+LDR		R0, =MESSAGE_INDEX
+LDR		R1, =MESSAGE
+MOV		R8, #0x40
+LDRB	R2, [R0]
+CMP		R2, #0x9
+BLE		I2C_TX_SETUP
+
+@ otherwise we are finished - mask the interrupts and exit
+LDR		R0, =0x4802A030
+LDR 	R1, [R0]
+ORR 	R1, R1, #0x12			@ disable XRDY and NACK interrupts
+STR		R1, [R0]
+
+@ disable the I2C interrupt
+LDR R0, =0x482000CC		@ INTC_MIR_SET2
+LDR R1, [R0]			@ read the register value
+MOV R2, #0x08			@ interrupt 71 = bit 7 in MIR2
+ORR R1, R1, R2			@ mask I2C interrupt
+STR R1, [R0]			@ write new value to the register
+
+@ disable the timer interrupt
+LDR 	R0, =0x482000CC		@ INTC_MIR_SET2
+LDR 	R1, [R0]
+MOV 	R2, #0x00000020		@ set bit 5 for interrupt 69
+ORR 	R1, R1, R2			@ mask Timer interrupt
+STR 	R1, [R0]			@ write new value to the register
+
+B		CLOSE_IRQ
+
+@----------------------------------------------------------------------------
+INT_I2C_NACK:
+@ check if we are doing initialization
+LDR		R0, =INIT_INDEX
+LDR		R1, =INIT_STREAM
+LDRB	R2, [R0]
+CMP		R2,	#0x9				@ 9 bytes to send for initialization
+BLE		I2C_NACK_INIT			@ branch to INIT if less than or equal to 
+
+@ check if we are sending message bytes
+LDR		R0, =MESSAGE_INDEX
+LDR		R1, =MESSAGE
+LDRB	R2, [R0]
+
+I2C_NACK_INIT:
+SUBS	R2, #2
+STRB	R2, [R0]
+B		I2C_TX_SETUP
+
+
+@----------------------------------------------------------------------------
+I2C_TX_SETUP:
+@ R0 = OFFSET ADDRESS
+@ R1 = STREAM ADDRESS
+@ R8 = control byte
+@ get the next byte to transmit
+LDRB	R2, [R0]				@ get the offset value
+ADD		R1, R1, R2				@ add the offset to the stream address
+LDRB	R3, [R1]				@ get the next byte to send
+
+@ load the control byte and the data byte into the FIFO
+LDR 	R1, =0x4802A09C			@ I2C_DATA Register
+STRB	R8, [R1]				@ write the control byte 0x00 to the FIFO
+STRB	R3, [R1]				@ write the data byte to the FIFO
+	
+@ increment the stream offset
+LDRB	R1, [R0]				@ R0 = offset address	
+ADD		R1, R1, #0x1			@ increment the offset value
+STRB	R1, [R0]				@ save the new value to memory
+
+B		I2C_TX_BEGIN
+
+
+@----------------------------------------------------------------------------
+I2C_TX_BEGIN:
+@ update the DCOUNT register
+LDR R0, =0x4802A098		@ I2C_COUNT Register
+MOV R1, #0x2
+STR R1, [R0]
+
+@ set module to master mode on every transfer
+LDR	R0, =0x4802A0A4					@ I2C_CON: Control register
+LDR 	R1, [R0]
+ORR 	R1, R1, #0x400					@ Master mode bit 10
+STR 	R1, [R0]
+
+@ configure the start/stop bits to begin transfer
+LDR 	R4, =0x4802A0A4		@ I2C_CON: Control Register
+LDR 	R5, [R4]
+ORR 	R5, R5, #0x03		@ Set the STT and STP bits to initiate transfer
+STR 	R5, [R4]			@ begin transmitting data by setting the start/stop bits
+
+B	CLOSE_IRQ
+
+
+@---------------------------------------------------------------------------- 
+@ Delay Loop Subroutine
+@ Handles the delay loop timing
+DELAY:
+STMFD R13!, {R0, R14}	@ save the register states and link register location
+LDR R0, =0x0022DCD5
+D_LOOP:
+	NOP
+	SUBS R0, #1
+	BNE D_LOOP
+LDMFD R13!, {R4, PC}
+	
+END:
+.END

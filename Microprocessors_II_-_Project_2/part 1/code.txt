@@ -1,0 +1,269 @@
+@ 372 Project 2 - Part 1
+
+.data
+.align 2
+@ define stack sizes
+@--------------------------------------------------------------------
+LED_STATUS: 	.word 0x00
+STACK1:		.rept 1024
+		.word 0x00
+		.endr
+STACK2:		.rept 1024
+		.word 0x00
+		.endr
+				
+@ define word messages to send
+@--------------------------------------------------------------------
+MESSAGE:	.ascii "@RYAN BENTZ"
+.align 4
+INIT_0: .byte 0x00, 0x38
+INIT_1: .byte 0x00, 0x39
+INIT_2: .byte 0x00, 0x14, 0x78, 0x5E
+INIT_3: .byte 0x00, 0x6D, 0x0C, 0x01, 0x06
+				
+.text
+.global _start
+.global INT_DIRECTOR
+_start:
+
+@ Define the Register Addressed, Offsets, and write values to control the LEDs
+.equ	DELAY_1S, 0x0022DCD5
+.equ	DELAY_1MS,0x37C7B
+
+@ Initialize the stack frames
+@--------------------------------------------------------------------
+LDR R13, =STACK1	@ initialize stack one for supervisor mode
+ADD R13, R13, #0x1000	@ point stack pointer to top of stack
+CPS #0x12		@ change to IRQ mode
+LDR R13, =STACK2	@ initialize stack for IRQ mode
+ADD R13, R13, #0x1000	@ point stack pointer to top of stack
+CPS #0x13		@ change back to supervisor mode
+
+
+@ Initialize the peripheral clocks
+@--------------------------------------------------------------------
+@ initialize the clock to I2C1
+LDR R0, =0x44E00048	@ CMPER.I2C1_CLKCTRL
+LDR R1, [R0]
+MOV	R2, #0x02
+ORR R1, R1, R2
+STR R1, [R0]
+
+@ Delay 1s and wait for peripheral clocks
+@--------------------------------------------------------------------
+LDR R0, =DELAY_1S
+BL DELAY
+
+@ Initialize the I2C
+@--------------------------------------------------------------------
+@ initialize the GPIO pins for the I2C functions
+@ set the SCL pin
+LDR R0, =0x44E1095C		@ CONTROL.conf_spi0_cs0
+LDR R1, [R0]			
+AND R1, R1, #0xFFFFFFF8		@ mask bits [2:0]
+ORR R1, R1, #0x02		@ enable mode 2
+STR R1, [R0]
+
+@ set the SDA pin
+LDR R0, =0x44E10958		@ CONTROL.conf_spi0_d1
+LDR R1, [R0]
+AND R1, R1, #0xFFFFFFF8		@ mask bits [2:0]
+ORR R1, R1, #0x02		@ enable mode 2
+STR R1, [R0]
+
+@ set I2C ICLK prescaler
+LDR R0, =0x4802A0B0		@ I2C_PSC: Clock prescaler register
+LDR R1, [R0]	
+MOV R2, #0x4			@ 48 MHz clock / 4 = 12 MHz clock
+ORR R1, R1, R2
+STR R1, [R0]
+
+@ set SCLL value
+LDR R0, =0x4802A0B4		@ I2C_SCLL: Low time register
+LDR R1, [R0]
+MOV R2, #0x35			@ see supporting documentation
+ORR R1, R1, R2
+STR R1, [R0]
+
+@ set SCLH value
+LDR R0, =0x4802A0B8		@ I2C_SCLH: High time register
+LDR R1, [R0]
+MOV R2, #0x37			@ see supporting documentation
+ORR R1, R1, R2
+STR R1, [R0]
+
+@ take the I2C module out of reset mode
+LDR R0, =0x4802A0A4		@ I2C_CON: Control register
+LDR R1, [R0]
+MOV R2, #0x8000			@ [15] = I2C_EN
+ORR R1, R1, R2			@ enable I2C module
+STR R1, [R0]
+
+@ configure I2C mode register without setting STT and STP
+LDR R0, =0x4802A0A4		@ I2C_CON: Control register
+LDR R1, [R0]
+LDR R2, =0xFFFF0000		@ mask lower bits of register
+AND R1, R1, R2
+ORR R1, R1, #0x8600		@ [10] enable master mode
+STR R1, [R0]			@ [9]  enable transmitter mode
+
+@ enable interrupt masks
+
+@ configure the slave address
+LDR R0, =0x4802A0AC		@ I2C_SA: Slave address register
+LDR R1, [R0]
+AND R1, R1, #0x0000
+ORR R1, R1, #0x3C		@ slave address per display documents
+STR R1, [R0]
+
+@ clear the TX FIFO
+LDR R0, =0x4802A094		@ I2C_BUF: Buf register
+LDR R1, [R0]
+ORR R1, R1, #0x40		@ [6] TXFIFO clear
+STR R1, [R0]
+
+
+@ Delay 1s and wait for module
+@--------------------------------------------------------------------
+LDR R0, =DELAY_1S
+BL DELAY
+
+
+@ Initialize the display
+@--------------------------------------------------------------------
+INIT_DISPLAY:
+
+@ transmit the first command sequence
+LDR R0, =INIT_0		 
+MOV R1, #0x02
+BL I2C_TRANSMIT_PROC
+
+@ wait for the display to process the command
+LDR R0, =DELAY_1MS
+BL DELAY
+
+@ transmit the second command sequence
+LDR R0, =INIT_1
+MOV R1, #0x02
+BL I2C_TRANSMIT_PROC
+
+@ wait for the display to process the command
+LDR R0, =DELAY_1MS
+BL DELAY
+
+@ transmit the third command byte sequence
+LDR R0, =INIT_2
+MOV R1, #0x04
+BL I2C_TRANSMIT_PROC
+
+@ wait for the display to process the command
+LDR R0, =DELAY_1MS
+BL DELAY
+
+@ transmit the fourth command byte sequence
+LDR R0, =INIT_3
+MOV R1, #0x05
+BL I2C_TRANSMIT_PROC
+
+@ wait for the display to process the command
+LDR R0, =DELAY_1MS
+BL DELAY
+
+@ transmit command to display "RYAN BENTZ"
+LDR R0, =MESSAGE
+MOV R1, #0xB
+BL I2C_TRANSMIT_PROC
+
+@ wait 1 ms
+LDR R0, =DELAY_1MS
+BL DELAY
+
+
+
+@ MAIN LOOP
+@--------------------------------------------------------------------
+MAIN_LOOP:
+	NOP				@ do nothing and wait for interrupt
+	B MAIN_LOOP				
+	B END
+
+
+@--------------------------------------------------------------------
+I2C_TRANSMIT_PROC:
+@ R0 = Address of bytes to send 
+@ R1 = Number of bytes to write
+@ R2 = Data Register Address
+@ R3 = Value of data to write
+
+STMFD R13!, {R0-R5, R14}		@ save the register states and link register location
+
+@ check that the bus is ready
+TX_WAIT:
+	LDR R4, =0x4802A024		@ I2C_IRQSTATUS_RAW
+	LDR R5, [R4]
+	MOV R6, #0x1000			@ Check Bit 12: Bus Busy Status
+	AND R5, R5, R6
+	CMP R5, #0x1000			@ If BB = 1, bus is occupied
+	BEQ TX_WAIT
+
+@ initialize the counter register
+LDR R4, =0x4802A098			@ I2C_COUNT register
+STR R1, [R4]				
+
+@ write the transmit data to the FIFO
+DATA_QUEUE:
+	LDR 	R2, =0x4802A09C		@ I2C_DATA Register
+	LDRB 	R3, [R0], #1		@ get data to send and post increment index
+	STRB 	R3, [R2]		@ write the value to the FIFO
+	SUBS 	R1, #1			@ decrement the number of bytes to send
+	BNE	DATA_QUEUE
+
+@ set module to master mode on every transfer
+LDR R4, =0x4802A0A4			@ I2C_CON: Control register
+LDR R5, [R4]
+ORR R5, R5, #0x400			@ Master mode bit 10
+STR R5, [R4]
+
+@ configure the start/stop bits
+LDR R4, =0x4802A0A4			@ I2C_CON: Control Register
+LDR R5, [R4]
+MOV R6, #0x03				@ Set the STT and STP bits to initiate transfer
+ORR R5, R5, R6
+@ begin transmitting data by setting the start/stop bits
+STR R5, [R4]
+
+LDMFD R13!, {R0-R5, PC}		@ return execution from the procedure
+
+
+
+@--------------------------------------------------------------------
+@ INT Director handles the interrupt routines
+INT_DIRECTOR:
+STMFD SP!, {R0-R3, LR}	@ push registers on to the stack
+	
+N
+
+@ exit int director ISR	
+PASS_ON:	
+@ re-enable IRQ interrupts in the processor
+MRS R3, CPSR			@ copy CPSR to R3
+BIC R3, #0x80			@ clear bit 7
+MSR CPSR_c, R3			@ write back to CPSR	
+
+LDMFD SP!, {R0-R3, LR}	@ restore register states
+SUBS PC, LR, #4			@ return service to the system IRQ
+
+
+@---------------------------------------------------------------------------- 
+@ Delay Loop Subroutine
+@ Handles the delay loop timing
+DELAY:
+STMFD R13!, {R4, R14}	@ save the register states and link register location
+D_LOOP:
+	NOP
+	SUBS R0, #1
+	BNE D_LOOP
+LDMFD R13!, {R4, PC}
+	
+END:
+.END
